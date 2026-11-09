@@ -49,7 +49,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    UI[Next.js<br/>useChat] --> P[/api/chat<br/>route handler/] --> F[FastAPI<br/>SSE stream] --> G[LangGraph agent] --> R[hybrid search<br/>BM25 + vectors + RRF]
+    UI[Next.js<br/>useChat] --> P["/api/chat<br/>route handler"] --> F[FastAPI<br/>SSE stream] --> G[LangGraph agent] --> R[hybrid search<br/>BM25 + vectors + RRF]
 ```
 
 | Layer | Stack |
