@@ -24,7 +24,7 @@ This agent only answers from the official consolidated text. A guardrail node in
 ## Architecture
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph Ingest["coe-ingest (offline)"]
         A[Prefeitura de SP<br/>Lei 16.642 + Decreto 57.776<br/>HTML + annex PDFs] --> B[Split by article / page<br/>drop revoked text<br/>tables to Markdown]
         B --> C[(chunks.jsonl)]
