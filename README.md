@@ -23,30 +23,33 @@ This agent only answers from the official consolidated text. A guardrail node in
 
 ## Architecture
 
+**The LangGraph agent** (`backend/src/coe_agent/graph.py`):
+
 ```mermaid
-flowchart TB
-    subgraph Ingest["coe-ingest (offline)"]
-        A[Prefeitura de SP<br/>Lei 16.642 + Decreto 57.776<br/>HTML + annex PDFs] --> B[Split by article / page<br/>drop revoked text<br/>tables to Markdown]
-        B --> C[(chunks.jsonl)]
-        C --> D[(Gemini embeddings)]
-        C --> E[(BM25 index)]
-    end
+flowchart TD
+    S((START)) --> AG[agent<br/>Gemini with 3 tools]
+    AG -- tool calls --> T[tools<br/>search_code · read_article · read_annex_page]
+    T -- passages + ids --> AG
+    AG -- final answer --> CC{check_citations}
+    CC -- "cited an id no tool returned<br/>(retry once)" --> AG
+    CC -- all ids verified --> E((END))
+```
 
-    subgraph Graph["LangGraph agent"]
-        S((START)) --> AG[agent<br/>Gemini + tools]
-        AG -- tool calls --> T[tools<br/>search_code · read_article · read_annex_page]
-        T --> AG
-        AG -- answer --> CC{check_citations}
-        CC -- unknown id<br/>retry once --> AG
-        CC -- ok --> END((END))
-    end
+**Ingestion** (`coe-ingest`, run once):
 
-    D & E -. hybrid search + RRF .-> T
+```mermaid
+flowchart LR
+    A[Prefeitura de SP<br/>law HTML + annex PDFs] --> B[split by article / page<br/>drop revoked text<br/>tables to Markdown]
+    B --> C[(chunks.jsonl)]
+    C --> D[(BM25)]
+    C --> V[(Gemini<br/>embeddings)]
+```
 
-    subgraph Web["Front end"]
-        UI[Next.js · useChat] -- /api/chat --> P[Route handler proxy]
-    end
-    P -- POST /api/chat --> F[FastAPI<br/>UI message stream SSE] --> S
+**Request path**:
+
+```mermaid
+flowchart LR
+    UI[Next.js<br/>useChat] --> P[/api/chat<br/>route handler/] --> F[FastAPI<br/>SSE stream] --> G[LangGraph agent] --> R[hybrid search<br/>BM25 + vectors + RRF]
 ```
 
 | Layer | Stack |
