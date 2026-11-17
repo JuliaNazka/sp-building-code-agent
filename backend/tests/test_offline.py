@@ -12,7 +12,7 @@ from coe_agent.tools import read_annex_page, read_article, search_code
 
 @pytest.fixture(autouse=True)
 def bm25_only(monkeypatch):
-    monkeypatch.setattr(retrieval, "_vectors", lambda: None)
+    monkeypatch.setattr(retrieval, "_vector_store", lambda: None)
 
 
 def test_chunk_ids_are_unique_and_articles_complete():
@@ -77,7 +77,7 @@ def test_citation_regex_tolerates_inciso_inside_brackets():
 
 
 def test_search_falls_back_to_bm25_when_embedding_fails(monkeypatch):
-    monkeypatch.setattr(retrieval, "_vectors", lambda: {"x": [1.0]})
+    monkeypatch.setattr(retrieval, "_vector_store", lambda: object())  # index "present"
 
     def boom(_q):
         raise RuntimeError("429")

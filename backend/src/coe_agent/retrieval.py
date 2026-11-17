@@ -1,23 +1,27 @@
-"""Hybrid retrieval: BM25 (exact legal terms) + Gemini embeddings (meaning), fused with RRF.
+"""Hybrid retrieval: BM25 (exact legal terms) + a Chroma vector store (meaning), fused with RRF.
 
 Legal text mixes both kinds of query: "pé-direito mínimo" needs the exact term, while
 "how tall must a bedroom be" needs semantic search. Reciprocal Rank Fusion merges the
 two ranked lists without having to calibrate their scores against each other.
+
+The vectors are Gemini embeddings stored in a persistent, local Chroma collection
+(data/index/chroma), queried through LangChain's `Chroma` vector store with a metadata
+filter on the source document.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import math
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 
 from rank_bm25 import BM25Okapi
 
-from .config import CHUNKS_FILE, EMBEDDING_MODEL, INDEX_FILE
+from .config import CHROMA_COLLECTION, CHROMA_DIR, CHUNKS_FILE, EMBEDDING_MODEL
 
 RRF_K = 60
 logger = logging.getLogger(__name__)
@@ -71,27 +75,63 @@ def _embeddings():
     return GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
 
 
+def _chroma_client():
+    import chromadb
+    from chromadb.config import Settings
+
+    return chromadb.PersistentClient(path=str(CHROMA_DIR), settings=Settings(anonymized_telemetry=False))
+
+
 @lru_cache(maxsize=1)
-def _vectors() -> dict[str, list[float]] | None:
-    if not INDEX_FILE.exists():
+def _vector_store():
+    """The Chroma vector store, or None if it was not built (or was built with another model)."""
+    if not CHROMA_DIR.exists():
         return None
-    data = json.loads(INDEX_FILE.read_text(encoding="utf-8"))
-    if data.get("model") != EMBEDDING_MODEL:
+    from langchain_chroma import Chroma
+
+    client = _chroma_client()
+    try:
+        collection = client.get_collection(CHROMA_COLLECTION)
+    except Exception:  # collection missing
         return None
-    return data["vectors"]
+    if (collection.metadata or {}).get("embedding_model") != EMBEDDING_MODEL or collection.count() == 0:
+        return None
+    return Chroma(client=client, collection_name=CHROMA_COLLECTION, embedding_function=_embeddings())
+
+
+def _metadata(c: dict) -> dict:
+    """Chroma metadata must be flat str/int/float/bool: keep what filters and citations need."""
+    return {k: c[k] for k in ("source", "locator", "heading", "url") if c.get(k) is not None}
 
 
 def build_vector_index(batch_size: int = 50) -> None:
-    import time
+    """Embed every chunk with Gemini and (re)write the Chroma collection."""
+    from langchain_chroma import Chroma
 
     chunks = load_chunks()
-    emb = _embeddings()
-    vectors: dict[str, list[float]] = {}
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    client = _chroma_client()
+    try:
+        client.delete_collection(CHROMA_COLLECTION)
+    except Exception:  # first run: nothing to delete
+        pass
+    store = Chroma(
+        client=client,
+        collection_name=CHROMA_COLLECTION,
+        embedding_function=_embeddings(),
+        collection_metadata={"embedding_model": EMBEDDING_MODEL},
+        collection_configuration={"hnsw": {"space": "cosine"}},
+    )
+    done = 0
     for start in range(0, len(chunks), batch_size):
         batch = chunks[start : start + batch_size]
         for attempt in range(5):
             try:
-                out = emb.embed_documents([_index_text(c) for c in batch])
+                store.add_texts(
+                    texts=[_index_text(c) for c in batch],
+                    metadatas=[_metadata(c) for c in batch],
+                    ids=[c["id"] for c in batch],
+                )
                 break
             except Exception as exc:  # free tier rate limits: back off and retry
                 wait = 15 * (attempt + 1)
@@ -99,19 +139,10 @@ def build_vector_index(batch_size: int = 50) -> None:
                 time.sleep(wait)
         else:
             raise RuntimeError("embedding failed after 5 attempts")
-        vectors.update({c["id"]: v for c, v in zip(batch, out)})
-        print(f"embedded {len(vectors)}/{len(chunks)}")
-    INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
-    INDEX_FILE.write_text(json.dumps({"model": EMBEDDING_MODEL, "vectors": vectors}), encoding="utf-8")
-    _vectors.cache_clear()
-    print(f"wrote vector index to {INDEX_FILE}")
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    return dot / (na * nb) if na and nb else 0.0
+        done += len(batch)
+        print(f"embedded {done}/{len(chunks)}")
+    _vector_store.cache_clear()
+    print(f"wrote {done} vectors to Chroma collection '{CHROMA_COLLECTION}' in {CHROMA_DIR}")
 
 
 @lru_cache(maxsize=256)
@@ -138,11 +169,13 @@ def search(query: str, k: int = 6, sources: set[str] | None = None, pool: int = 
     bm25_order = [i for i in bm25_order if bm25_scores[i] > 0]
 
     vector_order: list[int] = []
-    vectors = _vectors()
-    q = _embed_query(query) if vectors is not None else None
+    store = _vector_store()
+    q = _embed_query(query) if store is not None else None
     if q is not None:
-        scored = [(i, _cosine(q, vectors[chunks[i]["id"]])) for i in allowed if chunks[i]["id"] in vectors]
-        vector_order = [i for i, _ in sorted(scored, key=lambda x: x[1], reverse=True)[:pool]]
+        position = {c["id"]: i for i, c in enumerate(chunks)}
+        where = {"source": {"$in": sorted(sources)}} if sources else None
+        results = store.similarity_search_by_vector_with_relevance_scores(list(q), k=pool, filter=where)
+        vector_order = [position[doc.id] for doc, _ in results if doc.id in position]
 
     fused: dict[int, float] = {}
     for order in (bm25_order, vector_order):
@@ -156,4 +189,4 @@ def search(query: str, k: int = 6, sources: set[str] | None = None, pool: int = 
 
 
 def vector_index_ready() -> bool:
-    return _vectors() is not None
+    return _vector_store() is not None

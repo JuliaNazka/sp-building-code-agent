@@ -10,6 +10,8 @@ Mapping from graph events to stream parts:
 - tool results            -> tool-output-available (passage ids + locators)
 - failed citation check   -> reset-step (drops the unverified answer) + data-status
 - verified citations      -> source-url parts + data-citations
+
+Each request is traced in Langfuse when its keys are set (see tracing.py).
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, Human
 
 from .graph import build_graph, initial_state
 from .retrieval import vector_index_ready
+from .tracing import run_config, tracing_enabled
 
 app = FastAPI(title="COE agent")
 _graph = None
@@ -115,7 +118,9 @@ async def stream_agent(messages: list[dict]) -> AsyncIterator[str]:
 
     try:
         state = initial_state(question, history)
-        async for mode, payload in graph().astream(state, stream_mode=["messages", "updates"]):
+        async for mode, payload in graph().astream(
+            state, config=run_config(entrypoint="api"), stream_mode=["messages", "updates"]
+        ):
             if mode == "messages":
                 chunk, meta = payload
                 if meta.get("langgraph_node") != "agent" or not isinstance(chunk, AIMessageChunk):
@@ -222,7 +227,7 @@ async def chat(request: Request) -> StreamingResponse:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "vector_index": vector_index_ready()}
+    return {"ok": True, "vector_index": vector_index_ready(), "tracing": tracing_enabled()}
 
 
 def main() -> None:

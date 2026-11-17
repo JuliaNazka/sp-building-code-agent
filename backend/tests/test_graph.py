@@ -17,7 +17,7 @@ class ScriptedLLM(GenericFakeChatModel):
 
 @pytest.fixture(autouse=True)
 def bm25_only(monkeypatch):
-    monkeypatch.setattr(retrieval, "_vectors", lambda: None)
+    monkeypatch.setattr(retrieval, "_vector_store", lambda: None)
 
 
 def search_call(query: str, call_id: str = "c1") -> AIMessage:

@@ -12,10 +12,12 @@ ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
 CHUNKS_FILE = DATA_DIR / "chunks.jsonl"
-INDEX_FILE = DATA_DIR / "index" / "vectors.json"
+CHROMA_DIR = DATA_DIR / "index" / "chroma"  # persistent Chroma vector store (local, no server)
+CHROMA_COLLECTION = "coe_chunks"
 
-load_dotenv(ROOT / ".env")
-load_dotenv(ROOT / "backend" / ".env")
+# .env wins over variables already set in the shell, so a stale key elsewhere cannot shadow it.
+load_dotenv(ROOT / ".env", override=True)
+load_dotenv(ROOT / "backend" / ".env", override=True)
 
 
 def _load_windows_user_env(name: str) -> None:

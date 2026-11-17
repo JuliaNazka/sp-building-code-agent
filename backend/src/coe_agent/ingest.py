@@ -1,10 +1,10 @@
-"""Download the sources, split them into citable chunks and build the vector index.
+"""Download the sources, split them into citable chunks and build the Chroma vector index.
 
 Laws (HTML, consolidated text) are split by article, so every chunk can be cited as
 "art. 31". Annexes (PDF) are split by page, so every chunk can be cited as "p. 9".
 Text that the consolidated version marks as revoked (<del>) is dropped.
 
-    coe-ingest            # download if needed, chunk, embed
+    coe-ingest            # download if needed, chunk, embed into Chroma (data/index/chroma)
     coe-ingest --no-embed # chunk only (BM25 still works, no API key needed)
 """
 

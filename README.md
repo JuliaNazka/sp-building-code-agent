@@ -2,7 +2,7 @@
 
 An AI agent that answers questions about the **São Paulo Building Code** (*Código de Obras e Edificações*, COE) and **cites the exact article or annex page behind every claim**.
 
-It is a small, complete RAG project built with **LangGraph**, **LangChain** and **Gemini**, with a **Next.js + Vercel AI SDK** chat front end.
+It is a small, complete RAG project built with **LangGraph**, **LangChain**, a **Chroma** vector store and **Gemini**, with optional **Langfuse** tracing and a **Next.js + Vercel AI SDK** chat front end.
 
 ![Demo](docs/demo.gif)
 
@@ -14,11 +14,12 @@ This agent only answers from the official consolidated text. A guardrail node in
 
 ## What it does
 
-- **Hybrid retrieval**: BM25 for exact legal terms (*pé-direito*, *recuo*) and Gemini embeddings for meaning, fused with Reciprocal Rank Fusion.
+- **Hybrid retrieval**: BM25 for exact legal terms (*pé-direito*, *recuo*) and Gemini embeddings in a local, persistent **Chroma** collection for meaning, fused with Reciprocal Rank Fusion. Scope filters (law, decree, annexes) run as Chroma metadata filters.
 - **Structure-aware chunks**: laws are split **by article** (`art. 31`), annexes **by PDF page** (`p. 9`), so every chunk is a real citation. Text marked as revoked in the consolidated version is dropped, and PDF tables are also extracted as Markdown so the model can read rows and columns.
 - **Agent with 3 tools** (LangGraph): `search_code`, `read_article` (to follow cross-references such as "see art. 40") and `read_annex_page` (to read a whole table).
 - **Citation check node**: every `[id]` in the answer must match a passage a tool returned. If one doesn't, the agent gets one chance to rewrite, and the front end drops the unverified draft (AI SDK `reset-step`).
 - **Streaming UI**: the FastAPI server speaks the Vercel AI SDK UI message stream protocol, so `useChat` shows the tool calls live and turns citations into clickable links to the official source.
+- **Tracing (optional)**: with Langfuse keys in `.env`, every run is traced through the LangChain callback handler: LLM calls with prompts and token usage, tool runs and the citation check. Without the keys nothing changes.
 - Questions in **Portuguese or English**; answers come back in the language of the question.
 
 ## Architecture
@@ -42,25 +43,27 @@ flowchart LR
     A[Prefeitura de SP<br/>law HTML + annex PDFs] --> B[split by article / page<br/>drop revoked text<br/>tables to Markdown]
     B --> C[(chunks.jsonl)]
     C --> D[(BM25)]
-    C --> V[(Gemini<br/>embeddings)]
+    C --> V[(Chroma<br/>Gemini embeddings)]
 ```
 
 **Request path**:
 
 ```mermaid
 flowchart LR
-    UI[Next.js<br/>useChat] --> P["/api/chat<br/>route handler"] --> F[FastAPI<br/>SSE stream] --> G[LangGraph agent] --> R[hybrid search<br/>BM25 + vectors + RRF]
+    UI[Next.js<br/>useChat] --> P["/api/chat<br/>route handler"] --> F[FastAPI<br/>SSE stream] --> G[LangGraph agent] --> R[hybrid search<br/>BM25 + Chroma + RRF]
+    G -. traces, optional .-> L[(Langfuse)]
 ```
 
 | Layer | Stack |
 | --- | --- |
 | Agent | LangGraph `StateGraph` (custom nodes, conditional edges, typed state with reducers) |
 | LLM / embeddings | Gemini via `langchain-google-genai` (`init_chat_model`, so any LangChain provider can be swapped in) |
-| Retrieval | `rank-bm25` + cosine search over Gemini embeddings, Reciprocal Rank Fusion |
+| Retrieval | `rank-bm25` + Chroma vector store (persistent on disk, no server) via `langchain-chroma`, Reciprocal Rank Fusion |
+| Observability | Langfuse through its LangChain callback handler (optional, on only when keys are set) |
 | Parsing | BeautifulSoup (consolidated law HTML), PyMuPDF (annex PDFs and tables) |
 | API | FastAPI streaming the Vercel AI SDK UI message stream protocol |
 | Front end | Next.js 16, React 19, AI SDK `useChat`, Tailwind |
-| Tests | pytest with a scripted fake LLM (no API key needed) |
+| Tests | pytest with a scripted fake LLM and fake embeddings (no API key needed) |
 
 ## Quickstart
 
@@ -72,7 +75,7 @@ cd sp-building-code-agent
 cp .env.example .env          # paste your GOOGLE_API_KEY
 ```
 
-**1. Build the index** (downloads the official sources, chunks them, embeds them):
+**1. Build the index** (downloads the official sources, chunks them, embeds them into a local Chroma store in `data/index/chroma`):
 
 ```bash
 cd backend
@@ -97,6 +100,16 @@ cd frontend
 npm install
 npm run dev                   # http://localhost:3000
 ```
+
+**Optional: tracing with Langfuse.** Create a project in [Langfuse](https://langfuse.com) (cloud or self-hosted), then add its keys to `.env`:
+
+```bash
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+Each `coe-ask` run and chat request is then sent to Langfuse as a trace named `coe-agent`. `GET /api/health` reports whether tracing is on.
 
 **Tests** (no API key needed):
 
@@ -133,13 +146,14 @@ The agent translated the question into Portuguese legal terms, found the parking
 ```
 backend/src/coe_agent/
   config.py      sources, models, paths
-  ingest.py      download -> article/page chunks -> embeddings
-  retrieval.py   BM25 + vectors + RRF
+  ingest.py      download -> article/page chunks -> Chroma
+  retrieval.py   BM25 + Chroma + RRF
   tools.py       the agent's 3 tools (content + artifact)
   graph.py       LangGraph: agent -> tools -> check_citations
   server.py      FastAPI, AI SDK UI message stream
+  tracing.py     optional Langfuse callback
   cli.py         coe-ask
-backend/tests/   offline tests with a fake LLM
+backend/tests/   offline tests with a fake LLM and fake embeddings
 frontend/app/    Next.js chat (useChat) + /api/chat proxy
 data/chunks.jsonl  the processed corpus (292 chunks)
 ```
@@ -149,6 +163,7 @@ data/chunks.jsonl  the processed corpus (292 chunks)
 - It covers the COE only. Zoning (LPUOS), fire safety (Corpo de Bombeiros ITs) and accessibility (NBR 9050) are out of scope, and the agent says so when a question depends on them.
 - Some annex tables have merged cells. The Markdown extraction helps, but the model can still misread a row, so check the cited page.
 - The citation check proves that every cited passage was **retrieved**, not that it **supports** the sentence. In one test the agent correctly said that a *reparo* needs no permit, but cited the definition in art. 3 instead of art. 13, I, which is where the exemption is. A claim-level check (an LLM judge or an entailment model per sentence) is the natural next node in the graph.
+- The default flash-lite model does not always follow the language rule: in repeated runs of the same Portuguese question it sometimes answered in English. The numbers and citations were the same in every run.
 - No evaluation set yet. A next step is a small question/answer set scored for retrieval hit rate and citation accuracy.
 - The default model is `gemini-3.5-flash-lite` because the free tier of the larger Flash model allows only about 20 requests a day, and one question takes 3 to 7 calls. Set `COE_CHAT_MODEL` for a stronger model.
 - Not legal advice.

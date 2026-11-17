@@ -12,6 +12,7 @@ import sys
 
 from .graph import build_graph, initial_state, text_of
 from .retrieval import search, vector_index_ready
+from .tracing import flush, run_config
 
 
 def _print_search(query: str) -> None:
@@ -37,7 +38,9 @@ def main() -> None:
 
     graph = build_graph()
     final: dict = {}
-    for mode, payload in graph.stream(initial_state(args.question), stream_mode=["updates", "values"]):
+    for mode, payload in graph.stream(
+        initial_state(args.question), config=run_config(entrypoint="cli"), stream_mode=["updates", "values"]
+    ):
         if mode == "values":
             final = payload
             continue
@@ -53,6 +56,7 @@ def main() -> None:
     print("\n" + text_of(final["messages"][-1]).strip() + "\n")
     for c in final.get("citations", []):
         print(f"[{c['id']}] {c['title']}, {c['locator']}\n    {c['url']}")
+    flush()
 
 
 if __name__ == "__main__":
